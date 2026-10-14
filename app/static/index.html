@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Awaaz — Voice AI Roundtable</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css?v=9.0">
+</head>
+<body>
+  <div class="screen-wrapper">
+    <!-- 1. Header Bar -->
+    <header class="top-nav">
+      <div class="nav-brand">
+        <div class="brand-badge">AWAAZ</div>
+        <span class="brand-divider">/</span>
+        <span class="brand-room-label" id="navRoomLabel">Office Roundtable</span>
+      </div>
+
+      <!-- Segmented Room Switcher -->
+      <nav class="nav-rooms" aria-label="Discussion Rooms">
+        <button class="nav-room-btn active" data-room="office" onclick="switchRoom('office')">
+          <span class="room-indicator"></span>
+          <span>Office</span>
+        </button>
+        <button class="nav-room-btn" data-room="chill" onclick="switchRoom('chill')">
+          <span class="room-indicator"></span>
+          <span>Chill</span>
+        </button>
+        <button class="nav-room-btn" data-room="family" onclick="switchRoom('family')">
+          <span class="room-indicator"></span>
+          <span>Family</span>
+        </button>
+      </nav>
+
+      <!-- Right Action Cluster -->
+      <div class="nav-actions">
+        <!-- User Profile Pill -->
+        <div class="nav-user-pill" id="userCtrlContainer">
+          <div class="user-avatar-circle" id="userAvatarLetter">K</div>
+          <div class="user-name-display-box" id="userNameDisplayBox">
+            <span class="user-name-text" id="userNameNav" onclick="openNameEdit()" title="Click to rename">Ken</span>
+            <span class="user-role-badge" id="userNavRole">BOSS</span>
+            <button class="btn-rename-pill" onclick="openNameEdit()" title="Edit Name">Edit</button>
+          </div>
+          <div class="user-name-input-box hidden" id="userNameInputBox">
+            <input type="text" id="userNameInput" maxlength="20" placeholder="Name" onkeydown="handleNameInputKey(event)" />
+            <button class="btn-save-sm" onclick="saveUserName()">Save</button>
+            <button class="btn-cancel-sm" onclick="closeNameEdit()">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Live Status Pill -->
+        <div class="live-status-pill" id="liveStatus">
+          <span class="live-dot"></span>
+          <span id="liveStatusLabel">Ready</span>
+        </div>
+
+        <!-- Reset Button -->
+        <button class="btn-ghost-sm" onclick="resetRoomMemory()" title="Clear memory for this room">Reset</button>
+      </div>
+    </header>
+
+    <!-- 2. Integrated Agenda Card -->
+    <div class="agenda-card">
+      <div class="agenda-tag-pill">
+        <svg class="agenda-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M4 6h16M4 12h16M4 18h10"></path>
+        </svg>
+        <span>AGENDA</span>
+      </div>
+      <p class="agenda-text" id="agendaDisplay">Sprint Review: Finalizing Q4 Voice AI architecture, API latency, and delivery deadline.</p>
+      <div class="agenda-input-wrap hidden" id="agendaEditWrap">
+        <input type="text" id="agendaInput" placeholder="Set meeting agenda..." />
+        <button class="btn-save" onclick="saveAgenda()">Update</button>
+        <button class="btn-cancel" onclick="toggleEditAgenda()">Cancel</button>
+      </div>
+      <button class="btn-agenda-edit" id="agendaEditToggle" onclick="toggleEditAgenda()">Edit Topic</button>
+    </div>
+
+    <!-- 3. Roundtable Stage (3-Column Participant Grid) -->
+    <section class="stage-grid" id="participantsGrid">
+      <!-- Injected via app.js -->
+    </section>
+
+    <!-- 4. Transcript Stream -->
+    <section class="transcript-viewport">
+      <div class="transcript-scroll" id="transcriptViewport">
+        <div class="transcript-empty-state" id="emptyTranscript">
+          <div class="empty-icon-wrap">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+              <line x1="12" y1="19" x2="12" y2="22"></line>
+            </svg>
+          </div>
+          <h3 class="empty-title">Roundtable In Session</h3>
+          <p class="empty-sub">Start speaking naturally or click any suggestion below to address the group.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. Floating Bottom Command Dock -->
+    <footer class="bottom-dock">
+      <!-- Quick Prompt Suggestions -->
+      <div class="prompt-strip" id="promptsChips">
+        <!-- Rendered via app.js -->
+      </div>
+
+      <!-- Dock Control Form -->
+      <div class="dock-bar">
+        <button id="callBtn" class="btn-call" onclick="toggleVoiceCall()">
+          <span class="call-icon-wrap">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+              <line x1="12" y1="19" x2="12" y2="22"></line>
+            </svg>
+          </span>
+          <span id="callBtnLabel">Start Discussion</span>
+        </button>
+
+        <button id="muteBtn" class="btn-mute hidden" onclick="toggleMute()" title="Mute/Unmute Mic">
+          <span id="muteLabel">Mute</span>
+        </button>
+
+        <form class="dock-input-form" onsubmit="handleTextSubmit(event)">
+          <input type="text" id="textInput" placeholder="Speak or address someone in the room..." autocomplete="off" />
+          <button type="submit" class="btn-send" title="Send message">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </form>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/app.js?v=9.0"></script>
+</body>
+</html>
