@@ -530,12 +530,11 @@ async function startMicCapture() {
       const rms = Math.sqrt(sum / input.length);
 
       // When AI agents are speaking through speakers:
-      // Prevent speaker audio feedback from self-interrupting.
-      // Require clear, intentional user speech (> 0.055 RMS) sustained for at least 3 consecutive frames (~250ms).
+      // Prevent speaker audio feedback from self-interrupting while allowing natural human barge-in (> 0.032 RMS sustained for 2 frames ~170ms).
       if (state.isPlayingQueue) {
-        if (rms > 0.055) {
+        if (rms > 0.032) {
           state.bargeInFrames = (state.bargeInFrames || 0) + 1;
-          if (state.bargeInFrames >= 3) {
+          if (state.bargeInFrames >= 2) {
             state.bargeInFrames = 0;
             stopAudioQueue();
             clearActiveSpeaker();
@@ -543,11 +542,14 @@ async function startMicCapture() {
             if (state.ws && state.ws.readyState === WebSocket.OPEN) {
               state.ws.send(JSON.stringify({ type: 'barge_in' }));
             }
+            // Transition directly to recording user audio without dropping frame!
+          } else {
+            return;
           }
         } else {
           state.bargeInFrames = 0;
+          return;
         }
-        return; // Do not record user audio while AI is playing unless barge-in occurs
       }
 
       state.bargeInFrames = 0;
@@ -632,6 +634,11 @@ function downsampleTo16k(buffer, sampleRate) {
 
 function flushUserAudio() {
   if (state.pcmBuffers.length === 0) return;
+
+  if (state.isPlayingQueue) {
+    stopAudioQueue();
+    clearActiveSpeaker();
+  }
 
   const totalLen = state.pcmBuffers.reduce((acc, b) => acc + b.length, 0);
   const merged = new Float32Array(totalLen);
@@ -879,6 +886,11 @@ function handleTextSubmit(e) {
 }
 
 function transmitText(text) {
+  if (state.isPlayingQueue) {
+    stopAudioQueue();
+    clearActiveSpeaker();
+    showInterruptedNotice();
+  }
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify({
       type: 'text',

@@ -127,86 +127,35 @@ async def websocket_voice_endpoint(websocket: WebSocket):
     # Pre-warm session connection in background immediately
     asyncio.create_task(sarvam_client.warmup(session_http))
 
-    turn_cancel_flag = False
+    active_turn_task: Optional[asyncio.Task] = None
+    active_turn_cancel: Optional[asyncio.Event] = None
 
-    try:
-        while True:
-            raw_msg = await websocket.receive_text()
-            data = json.loads(raw_msg)
-            msg_type = data.get("type", "")
+    async def cancel_active_turn():
+        nonlocal active_turn_task, active_turn_cancel
+        if active_turn_task and not active_turn_task.done():
+            if active_turn_cancel:
+                active_turn_cancel.set()
+            active_turn_task.cancel()
+            try:
+                await active_turn_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Error cancelling active turn: {e}")
+            active_turn_task = None
 
-            if msg_type == "barge_in":
-                turn_cancel_flag = True
-                await safe_send(websocket, {"type": "interrupted"})
-                continue
-            if msg_type == "set_room":
-                new_room = data.get("room_id", DEFAULT_ROOM_ID)
-                sess.set_room(new_room)
-                await safe_send(websocket, {
-                    "type": "room_changed", "room": get_room(new_room),
-                    "agenda": sess.get_current_agenda(), "user_name": sess.user_name,
-                    "user_role": sess.get_user_role_in_room(),
-                })
-                continue
-            if msg_type == "set_agenda":
-                new_agenda = data.get("agenda", "").strip()
-                r_id = data.get("room_id", sess.room_id)
-                if new_agenda:
-                    sess.set_agenda(r_id, new_agenda)
-                await safe_send(websocket, {"type": "agenda_updated", "room_id": r_id, "agenda": sess.get_current_agenda()})
-                continue
-            if msg_type == "set_user_name":
-                new_name = data.get("user_name", "").strip()
-                if new_name:
-                    sess.set_user_name(new_name)
-                await safe_send(websocket, {"type": "user_profile_updated", "user_name": sess.user_name, "role": sess.get_user_role_in_room()})
-                continue
-            if msg_type == "reset":
-                sess.clear()
-                await safe_send(websocket, {"type": "system", "message": "Memory cleared."})
-                continue
-
-            user_text = ""
-            detected_lang = "en-IN"
-
-            if msg_type == "audio":
-                audio_b64 = data.get("audio_base64", "")
-                if not audio_b64:
-                    continue
-                try:
-                    transcript, detected_lang = await sarvam_client.speech_to_text(
-                        audio_bytes=base64.b64decode(audio_b64),
-                        custom_client=session_http,
-                    )
-                    user_text = transcript.strip()
-                except Exception as e:
-                    logger.error(f"STT error: {e}")
-                    await safe_send(websocket, {"type": "status", "status": "listening"})
-                    continue
-
-            elif msg_type == "text":
-                user_text = data.get("text", "").strip()
-                detected_lang = "en-IN"
-
-            if not user_text or len(user_text) < 2:
-                await safe_send(websocket, {"type": "status", "status": "listening"})
-                continue
-
-            if check_interruption_intent(user_text):
-                await safe_send(websocket, {"type": "interrupted", "text": "Stopped."})
-                continue
-
+    async def execute_agent_turn(u_text: str, u_lang: str, cancel_ev: asyncio.Event):
+        try:
             await safe_send(websocket, {
                 "type": "user_speech",
-                "text": user_text,
+                "text": u_text,
                 "speaker_name": sess.user_name,
                 "role": sess.get_user_role_in_room(),
-                "lang": detected_lang,
+                "lang": u_lang,
             })
-            sess.add_user_speech(user_text, detected_lang)
+            sess.add_user_speech(u_text, u_lang)
 
-            speaking_personas = select_speakers_for_turn(user_text, sess)
-            turn_cancel_flag = False
+            speaking_personas = select_speakers_for_turn(u_text, sess)
             await safe_send(websocket, {"type": "turn_plan", "speakers": speaking_personas})
 
             idx = 0
@@ -216,7 +165,7 @@ async def websocket_voice_endpoint(websocket: WebSocket):
             addressed_by_peer = False
 
             while idx < len(speaking_personas):
-                if turn_cancel_flag or websocket.client_state != WebSocketState.CONNECTED:
+                if cancel_ev.is_set() or websocket.client_state != WebSocketState.CONNECTED:
                     break
                 p_id = speaking_personas[idx]
                 idx += 1
@@ -259,14 +208,14 @@ async def websocket_voice_endpoint(websocket: WebSocket):
 
                 async def tts_worker(seq: int, phrase: str):
                     try:
-                        if turn_cancel_event.is_set() or turn_cancel_flag:
+                        if cancel_ev.is_set() or turn_cancel_event.is_set():
                             return
                         audio_b64 = await sarvam_client.text_to_speech(phrase, persona, custom_client=session_http)
-                        if not turn_cancel_event.is_set() and not turn_cancel_flag:
+                        if not cancel_ev.is_set() and not turn_cancel_event.is_set():
                             await clause_queue.put((seq, phrase, audio_b64))
                     except Exception as err:
                         logger.error(f"TTS synthesis error for {p_id} seq {seq}: {err}")
-                        if not turn_cancel_event.is_set() and not turn_cancel_flag:
+                        if not cancel_ev.is_set() and not turn_cancel_event.is_set():
                             await clause_queue.put((seq, phrase, None))
 
                 async def sender_worker():
@@ -275,12 +224,12 @@ async def websocket_voice_endpoint(websocket: WebSocket):
                     buffer_map = {}
 
                     while True:
-                        if turn_cancel_flag or turn_cancel_event.is_set() or websocket.client_state != WebSocketState.CONNECTED:
+                        if cancel_ev.is_set() or turn_cancel_event.is_set() or websocket.client_state != WebSocketState.CONNECTED:
                             break
 
                         if expected_seq in buffer_map:
                             seq, phrase, audio_b64 = buffer_map.pop(expected_seq)
-                            if audio_b64 and not turn_cancel_flag and not turn_cancel_event.is_set():
+                            if audio_b64 and not cancel_ev.is_set() and not turn_cancel_event.is_set():
                                 if first_audio_time is None:
                                     first_audio_time = time.perf_counter()
                                     ttfa_ms = (first_audio_time - turn_start_time) * 1000
@@ -319,7 +268,7 @@ async def websocket_voice_endpoint(websocket: WebSocket):
                     async for token in sarvam_client.stream_chat_completion(
                         messages=llm_messages, custom_client=session_http
                     ):
-                        if turn_cancel_flag or websocket.client_state != WebSocketState.CONNECTED:
+                        if cancel_ev.is_set() or websocket.client_state != WebSocketState.CONNECTED:
                             turn_cancel_event.set()
                             break
 
@@ -344,7 +293,7 @@ async def websocket_voice_endpoint(websocket: WebSocket):
                                 clause_tasks.append(task)
                                 dispatched_clauses += 1
 
-                    if clause_buffer and not turn_cancel_flag and not turn_cancel_event.is_set():
+                    if clause_buffer and not cancel_ev.is_set() and not turn_cancel_event.is_set():
                         rem = clean_spoken_text(clause_buffer)
                         if rem and len(rem) >= 2:
                             task = asyncio.create_task(tts_worker(dispatched_clauses, rem))
@@ -354,7 +303,7 @@ async def websocket_voice_endpoint(websocket: WebSocket):
                     stream_done.set()
                     await sender_task
 
-                    if full_turn_text and not turn_cancel_flag and not turn_cancel_event.is_set():
+                    if full_turn_text and not cancel_ev.is_set() and not turn_cancel_event.is_set():
                         turn_clean = clean_spoken_text(full_turn_text)
                         sess.add_persona_speech(p_id, turn_clean)
                         preceding_speaker_id = p_id
@@ -374,6 +323,8 @@ async def websocket_voice_endpoint(websocket: WebSocket):
                                     "from_speaker": p_id,
                                     "to_speaker": referred,
                                 })
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.error(f"Turn error for {p_id}: {e}")
                 finally:
@@ -384,12 +335,100 @@ async def websocket_voice_endpoint(websocket: WebSocket):
                     if not sender_task.done():
                         sender_task.cancel()
 
-                await safe_send(websocket, {"type": "agent_done", "speaker_id": p_id})
+                if not cancel_ev.is_set():
+                    await safe_send(websocket, {"type": "agent_done", "speaker_id": p_id})
 
-            await safe_send(websocket, {"type": "status", "status": "listening"})
+            if not cancel_ev.is_set():
+                await safe_send(websocket, {"type": "status", "status": "listening"})
+        except asyncio.CancelledError:
+            logger.info("execute_agent_turn cancelled by interruption.")
+        except Exception as e:
+            logger.error(f"execute_agent_turn unexpected error: {e}")
+
+    try:
+        while True:
+            raw_msg = await websocket.receive_text()
+            data = json.loads(raw_msg)
+            msg_type = data.get("type", "")
+
+            if msg_type == "barge_in":
+                await cancel_active_turn()
+                await safe_send(websocket, {"type": "interrupted"})
+                continue
+            if msg_type == "set_room":
+                await cancel_active_turn()
+                new_room = data.get("room_id", DEFAULT_ROOM_ID)
+                sess.set_room(new_room)
+                await safe_send(websocket, {
+                    "type": "room_changed", "room": get_room(new_room),
+                    "agenda": sess.get_current_agenda(), "user_name": sess.user_name,
+                    "user_role": sess.get_user_role_in_room(),
+                })
+                continue
+            if msg_type == "set_agenda":
+                new_agenda = data.get("agenda", "").strip()
+                r_id = data.get("room_id", sess.room_id)
+                if new_agenda:
+                    sess.set_agenda(r_id, new_agenda)
+                await safe_send(websocket, {"type": "agenda_updated", "room_id": r_id, "agenda": sess.get_current_agenda()})
+                continue
+            if msg_type == "set_user_name":
+                new_name = data.get("user_name", "").strip()
+                if new_name:
+                    sess.set_user_name(new_name)
+                await safe_send(websocket, {"type": "user_profile_updated", "user_name": sess.user_name, "role": sess.get_user_role_in_room()})
+                continue
+            if msg_type == "reset":
+                await cancel_active_turn()
+                sess.clear()
+                await safe_send(websocket, {"type": "system", "message": "Memory cleared."})
+                continue
+
+            user_text = ""
+            detected_lang = "en-IN"
+
+            if msg_type == "audio":
+                audio_b64 = data.get("audio_base64", "")
+                if not audio_b64:
+                    continue
+                try:
+                    transcript, detected_lang = await sarvam_client.speech_to_text(
+                        audio_bytes=base64.b64decode(audio_b64),
+                        custom_client=session_http,
+                    )
+                    user_text = transcript.strip()
+                except Exception as e:
+                    logger.error(f"STT error: {e}")
+                    await safe_send(websocket, {"type": "status", "status": "listening"})
+                    continue
+
+            elif msg_type == "text":
+                user_text = data.get("text", "").strip()
+                detected_lang = "en-IN"
+
+            if not user_text or len(user_text) < 2:
+                await safe_send(websocket, {"type": "status", "status": "listening"})
+                continue
+
+            # Crucial: If an agent was speaking or generating, immediately interrupt and halt it!
+            had_active = active_turn_task is not None and not active_turn_task.done()
+            if had_active:
+                logger.info(f"Interrupting active agent turn with new user input: '{user_text}'")
+                await cancel_active_turn()
+                await safe_send(websocket, {"type": "interrupted"})
+
+            if check_interruption_intent(user_text):
+                await safe_send(websocket, {"type": "interrupted", "text": "Stopped."})
+                continue
+
+            active_turn_cancel = asyncio.Event()
+            active_turn_task = asyncio.create_task(
+                execute_agent_turn(user_text, detected_lang, active_turn_cancel)
+            )
     except (WebSocketDisconnect, RuntimeError):
         logger.info(f"WebSocket closed: session {session_id}")
     finally:
+        await cancel_active_turn()
         await session_http.aclose()
 
 
