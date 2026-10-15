@@ -13,20 +13,4 @@ services:
       - .env
     environment:
       - SARVAM_API_KEY=${SARVAM_API_KEY}
-      - LIVEKIT_URL=ws://livekit:7880
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret123456789012345678901234567890}
-    depends_on:
-      - livekit
 
-  livekit:
-    image: livekit/livekit-server:latest
-    container_name: awaaz_livekit
-    restart: unless-stopped
-    command: ["--dev"]
-    ports:
-      - "7880:7880"
-      - "7881:7881"
-      - "7882:7882/udp"
-    environment:
-      - LIVEKIT_KEYS=${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-secret123456789012345678901234567890}

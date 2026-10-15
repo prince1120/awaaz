@@ -61,10 +61,12 @@ const state = {
   mediaStream: null,
   scriptProcessor: null,
   pcmBuffers: [],
+  preRollBuffers: [],
+  maxPreRoll: 3,
   speechStartTime: 0,
   silenceTimer: null,
-  volumeThreshold: 0.022,
-  silenceDurationMs: 400,
+  volumeThreshold: 0.013,
+  silenceDurationMs: 1100,
   bargeInFrames: 0,
   voiceFrames: 0,
   ws: null,
@@ -76,6 +78,8 @@ const state = {
   turnCount: 0,
   currentTurnBubble: null,
   currentTurnSpeakerId: null,
+  pendingPrompts: [],
+  speakerTimers: [],
 };
 
 const els = {};
@@ -102,6 +106,20 @@ function initElements() {
 document.addEventListener('DOMContentLoaded', () => {
   initElements();
   renderRoomUI('office');
+
+  // Pre-warm Web Audio context on user's first touch/click
+  const unlockAudio = () => {
+    getAudioContext();
+    window.removeEventListener('click', unlockAudio);
+    window.removeEventListener('keydown', unlockAudio);
+    window.removeEventListener('touchstart', unlockAudio);
+  };
+  window.addEventListener('click', unlockAudio);
+  window.addEventListener('keydown', unlockAudio);
+  window.addEventListener('touchstart', unlockAudio);
+
+  // Background server pre-warm
+  fetch('/api/prewarm', { method: 'POST' }).catch(() => {});
 });
 
 function getAudioContext() {
@@ -356,6 +374,14 @@ async function joinDiscussion() {
       }
 
       await startMicCapture();
+
+      // Flush any queued prompts sent while connecting
+      if (state.pendingPrompts && state.pendingPrompts.length > 0) {
+        while (state.pendingPrompts.length > 0) {
+          const queued = state.pendingPrompts.shift();
+          transmitText(queued);
+        }
+      }
     };
 
     state.ws.onmessage = async (evt) => {
@@ -405,6 +431,27 @@ function handleServerEvent(msg) {
       if (msg.agenda && els.agendaDisplay) {
         els.agendaDisplay.textContent = msg.agenda;
         if (els.agendaInput) els.agendaInput.value = msg.agenda;
+      }
+      break;
+
+    case 'turn_plan':
+      if (msg.speakers && msg.speakers.length > 1) {
+        const room = ROOM_DATA[state.currentRoom];
+        const names = msg.speakers.map(pid => {
+          const p = room ? room.participants.find(x => x.id === pid) : null;
+          return p ? p.name : pid;
+        });
+        if (msg.peer_referral) {
+          updateStatus(`${names[0]} invited ${names[1]}`, true);
+        } else {
+          updateStatus(`Order: ${names.join(' → ')}`, true);
+        }
+      }
+      break;
+
+    case 'latency_stats':
+      if (msg.ttfa_ms) {
+        updateStatus(`Live · TTFA ${msg.ttfa_ms}ms`, true);
       }
       break;
 
@@ -505,17 +552,28 @@ async function startMicCapture() {
 
       state.bargeInFrames = 0;
 
-      // Normal speech recording when agents are quiet
+      // Maintain rolling pre-roll buffer of incoming frames
+      if (!state.preRollBuffers) state.preRollBuffers = [];
+      state.preRollBuffers.push(new Float32Array(input));
+      if (state.preRollBuffers.length > (state.maxPreRoll || 3)) {
+        state.preRollBuffers.shift();
+      }
+
+      // Speech recording with calibrated VAD
       if (rms > state.volumeThreshold) {
         state.voiceFrames = (state.voiceFrames || 0) + 1;
-        if (state.voiceFrames >= 2) {
-          setActiveSpeaker('user');
-          state.pcmBuffers.push(new Float32Array(input));
-          if (state.speechStartTime === 0) state.speechStartTime = Date.now();
-          if (state.silenceTimer) {
-            clearTimeout(state.silenceTimer);
-            state.silenceTimer = null;
+        // On speech onset, prepend pre-roll frames so starting syllable is never clipped
+        if (state.voiceFrames === 1 && state.pcmBuffers.length === 0) {
+          for (let p = 0; p < state.preRollBuffers.length - 1; p++) {
+            state.pcmBuffers.push(state.preRollBuffers[p]);
           }
+        }
+        setActiveSpeaker('user');
+        state.pcmBuffers.push(new Float32Array(input));
+        if (state.speechStartTime === 0) state.speechStartTime = Date.now();
+        if (state.silenceTimer) {
+          clearTimeout(state.silenceTimer);
+          state.silenceTimer = null;
         }
       } else {
         state.voiceFrames = 0;
@@ -551,6 +609,27 @@ function stopMicCapture() {
   clearActiveSpeaker();
 }
 
+function downsampleTo16k(buffer, sampleRate) {
+  if (sampleRate === 16000) return buffer;
+  const ratio = sampleRate / 16000;
+  const newLength = Math.round(buffer.length / ratio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+    let accum = 0, count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count++;
+    }
+    result[offsetResult] = count > 0 ? accum / count : buffer[offsetBuffer];
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
 function flushUserAudio() {
   if (state.pcmBuffers.length === 0) return;
 
@@ -566,12 +645,16 @@ function flushUserAudio() {
   state.silenceTimer = null;
 
   const ctx = getAudioContext();
-  const sampleRate = ctx.sampleRate || 48000;
+  const inputSampleRate = ctx.sampleRate || 48000;
+  const targetSampleRate = 16000;
 
-  const durationSec = totalLen / sampleRate;
-  if (durationSec < 0.20) return;
+  // Downsample merged audio to 16kHz for 3x bandwidth savings & optimal Saaras STT
+  const downsampled = downsampleTo16k(merged, inputSampleRate);
 
-  const wavBytes = encodeWAV(merged, sampleRate);
+  const durationSec = downsampled.length / targetSampleRate;
+  if (durationSec < 0.25) return;
+
+  const wavBytes = encodeWAV(downsampled, targetSampleRate);
   const b64 = arrayBufferToBase64(wavBytes);
 
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
@@ -640,18 +723,26 @@ function scheduleAudioPlayback(audioBuf, speakerId) {
   const ctx = getAudioContext();
   const now = ctx.currentTime;
   state.isPlayingQueue = true;
-  setActiveSpeaker(speakerId);
 
-  // If buffer fell behind or starting fresh, add 0.035s lead time for smooth playback
+  // If buffer fell behind or starting fresh, add lead time for smooth continuous stream
   if (!state.nextAudioTime || state.nextAudioTime < now) {
     state.nextAudioTime = now + 0.035;
   }
 
+  const scheduledStart = state.nextAudioTime;
   const src = ctx.createBufferSource();
   src.buffer = audioBuf;
   src.connect(ctx.destination);
-  src.start(state.nextAudioTime);
+  src.start(scheduledStart);
   state.scheduledSources.push(src);
+
+  // Synchronize UI highlight with exact audio playback start
+  const delayMs = Math.max(0, (scheduledStart - now) * 1000);
+  const speakerTimer = setTimeout(() => {
+    setActiveSpeaker(speakerId);
+  }, delayMs);
+  if (!state.speakerTimers) state.speakerTimers = [];
+  state.speakerTimers.push(speakerTimer);
 
   state.nextAudioTime += audioBuf.duration;
 
@@ -662,6 +753,7 @@ function scheduleAudioPlayback(audioBuf, speakerId) {
     state.isPlayingQueue = false;
     clearActiveSpeaker();
     state.nextAudioTime = 0;
+    updateStatus('Listening', true);
   }, remainingMs + 40);
 }
 
@@ -671,6 +763,10 @@ function stopAudioQueue() {
   if (state.playbackEndTimer) {
     clearTimeout(state.playbackEndTimer);
     state.playbackEndTimer = null;
+  }
+  if (state.speakerTimers && state.speakerTimers.length > 0) {
+    state.speakerTimers.forEach(t => clearTimeout(t));
+    state.speakerTimers = [];
   }
   if (state.scheduledSources && state.scheduledSources.length > 0) {
     state.scheduledSources.forEach(s => {
@@ -766,9 +862,9 @@ function showInterruptedNotice() {
 function sendPrompt(text) {
   if (!text) return;
   if (!state.isConnected) {
-    joinDiscussion().then(() => {
-      setTimeout(() => transmitText(text), 600);
-    });
+    if (!state.pendingPrompts) state.pendingPrompts = [];
+    state.pendingPrompts.push(text);
+    joinDiscussion();
   } else {
     transmitText(text);
   }

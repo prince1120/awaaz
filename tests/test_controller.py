@@ -88,3 +88,106 @@ def test_dual_layer_memory():
     assert len(sess.global_history) == 0
     assert len(sess.local_memory["manager"]) == 0
     assert len(sess.local_memory["friend"]) == 0
+
+
+def test_multi_agent_explicit_ordering():
+    # User addresses Rohan and Dev
+    office_order_1 = select_speakers_for_turn("Rohan and Dev, what do you think?", room_id="office")
+    assert office_order_1 == ["manager", "tech_lead"]
+
+    # User addresses Dev and Rohan (reversed order)
+    office_order_2 = select_speakers_for_turn("Dev and Rohan, can we ship this?", room_id="office")
+    assert office_order_2 == ["tech_lead", "manager"]
+
+    # Chill room both speakers
+    chill_order = select_speakers_for_turn("Sunny and Shiro, let's plan a trip", room_id="chill")
+    assert chill_order == ["friend", "saheli"]
+
+    # Family room both speakers
+    family_order = select_speakers_for_turn("Mom and Dad, what should I do?", room_id="family")
+    assert family_order == ["mom", "dad"]
+
+    # Generic 'both of you'
+    both_office = select_speakers_for_turn("What do both of you think?", room_id="office")
+    assert both_office == ["manager", "tech_lead"]
+
+    # Hindi 'dono'
+    dono_family = select_speakers_for_turn("Dono batao kya sahi rahega?", room_id="family")
+    assert dono_family == ["mom", "dad"]
+
+
+def test_peer_referral_detection():
+    from app.controller import detect_peer_referral
+
+    # Rohan invites Dev
+    ref1 = detect_peer_referral("Dev, what's your technical assessment on the database latency?", "manager", "office")
+    assert ref1 == "tech_lead"
+
+    # Dev references Rohan
+    ref2 = detect_peer_referral("Rohan, can we fit this into sprint 3?", "tech_lead", "office")
+    assert ref2 == "manager"
+
+    # Sunny references Shiro
+    ref3 = detect_peer_referral("Shiro, remember that cafe in Old Goa?", "friend", "chill")
+    assert ref3 == "saheli"
+
+    # Shiro references Sunny
+    ref4 = detect_peer_referral("Sunny, that sounds like a crazy idea!", "saheli", "chill")
+    assert ref4 == "friend"
+
+    # Mom references Dad
+    ref5 = detect_peer_referral("Mahesh ji, aap bhi samjhaiye ise.", "mom", "family")
+    assert ref5 == "dad"
+
+    # Dad references Mom
+    ref6 = detect_peer_referral("Shalini theek keh rahi hai, health pe pehle dhyan do.", "dad", "family")
+    assert ref6 == "mom"
+
+    # Unrelated statement should not trigger peer referral
+    ref_none = detect_peer_referral("The quarterly results look promising and steady.", "manager", "office")
+    assert ref_none is None
+
+
+def test_multi_agent_turn_context_prompting():
+    sess = GroupDiscussionSession("test_context_session")
+    sess.set_room("office")
+    sess.add_user_speech("Dev and Rohan, how do we reduce latency?")
+    sess.add_persona_speech("tech_lead", "We should use HTTP/2 streaming and Redis caching.")
+
+    # Second speaker (Rohan) speaks with turn_context referencing Dev
+    turn_ctx = {
+        "is_multi_turn_second_speaker": True,
+        "preceding_speaker_id": "tech_lead",
+        "preceding_speaker_name": "Tech Lead (Dev)",
+        "preceding_short_name": "Dev",
+        "preceding_turn_text": "We should use HTTP/2 streaming and Redis caching.",
+        "addressed_by_peer": False,
+    }
+
+    msgs = sess.build_persona_llm_messages("manager", turn_context=turn_ctx)
+    system_text = msgs[0]["content"]
+
+    # Verify that prompt instructs referencing Dev by name
+    assert "MULTI-AGENT SEQUENTIAL ROUNDTABLE TURN" in system_text
+    assert "Dev" in system_text
+    assert "reference" in system_text.lower()
+
+
+def test_clause_segmentation():
+    from app.main import should_split_clause
+
+    # Short incomplete phrase should not split
+    assert should_split_clause("Hello") is False
+
+    # Terminal punctuation on >= 3 words splits cleanly
+    assert should_split_clause("Sure thing, Ken.") is True
+    assert should_split_clause("Haan bilkul, Shiro!") is True
+    assert should_split_clause("What do you think?") is True
+
+    # Comma should NOT split mid-sentence (preserves natural prosody)
+    assert should_split_clause("Looking at the system architecture,") is False
+    assert should_split_clause("Sunny is right, yaar,") is False
+
+    # Fallback threshold for long clauses without punctuation
+    long_clause = "This is a continuous stream of words without any punctuation mark at all to test length threshold and prevent buffer overrun"
+    assert should_split_clause(long_clause) is True

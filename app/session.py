@@ -81,7 +81,12 @@ class GroupDiscussionSession:
 
         self.last_active = time.time()
 
-    def build_persona_llm_messages(self, persona_id: str, max_turns: int = 16) -> List[Dict[str, str]]:
+    def build_persona_llm_messages(
+        self,
+        persona_id: str,
+        max_turns: int = 16,
+        turn_context: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, str]]:
         persona = get_persona(persona_id)
         room = get_room(self.room_id)
         agenda = self.get_current_agenda()
@@ -102,11 +107,33 @@ class GroupDiscussionSession:
             "\nCRITICAL CONVERSATION RULES:",
             f"- READ THE FULL CONVERSATION HISTORY. You know what {self.user_name} said and what other participants said.",
             f"- DIRECTLY ANSWER what {self.user_name} asks or brings up. Follow the conversational flow.",
-            "- PROPOSE REAL, SPECIFIC IDEAS: When asked for suggestions or plans, pitch concrete, imaginative ideas (places, activities, technical solutions). Never tell the user 'tum batao' or ask them to answer their own question.",
-            "- Speak naturally like a real human participant in 2 to 3 engaging sentences (say whatever is needed to give a satisfying, complete response).",
+            "- PROPOSE REAL, SPECIFIC IDEAS: When asked for suggestions or plans, pitch concrete, imaginative ideas. Never tell the user 'tum batao' or ask them to answer their own question.",
+            f"- IDENTITY INTEGRITY: You are {persona['name']}. Speak in first-person ('I', 'me', 'main'). NEVER refer to yourself in the third-person (never say '{persona['name']} is' or '{persona['name']} will').",
+            "- STRICT LENGTH LIMIT: Speak in ONLY 1 TO 2 SHORT, PUNCHY SENTENCES (maximum 20-25 words total). Never give long speeches, paragraphs, or monologues. Stop speaking immediately after your main point.",
             "- LANGUAGE: Reply in the exact same language that the user is speaking. Never switch languages on your own.",
             "- Never prefix your message with your name or any label. Zero markdown."
         ])
+
+        if turn_context:
+            preceding_name = turn_context.get("preceding_speaker_name", "")
+            preceding_short_name = turn_context.get("preceding_short_name") or (preceding_name.split()[0] if preceding_name else "")
+            
+            if turn_context.get("is_multi_turn_second_speaker"):
+                system_content.extend([
+                    "\nMULTI-AGENT SEQUENTIAL ROUNDTABLE TURN:",
+                    f"- {self.user_name} asked both participants in the room to answer.",
+                    f"- {preceding_name} has just given their perspective immediately before you. YOU ARE SPEAKING SECOND.",
+                    f"- Reference {preceding_short_name} by name in your opening (e.g., 'To add to what {preceding_short_name} said...', 'I agree with {preceding_short_name}, but...').",
+                    f"- Keep your turn strictly to 1 to 2 short sentences (under 20 words). Bring your unique {persona['role']} perspective.",
+                    f"- Address both {preceding_short_name} and {self.user_name} naturally in the room."
+                ])
+            elif turn_context.get("addressed_by_peer"):
+                system_content.extend([
+                    "\nDIRECT PEER-TO-PEER INTERACTION:",
+                    f"- {preceding_name} just addressed you or invited your input in the discussion.",
+                    f"- Address {preceding_short_name} back by name in your response in 1 to 2 short sentences (under 20 words).",
+                    f"- Keep both {preceding_short_name} and {self.user_name} in the conversation loop."
+                ])
 
         if self.room_id == "office":
             system_content.append(f"Relationship: You report to {self.user_name}. Keep it professional and conversational. Do NOT spam 'Boss'.")

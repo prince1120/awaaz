@@ -9,13 +9,13 @@ Unlike single-persona voice bots, Awaaz runs live multi-character roundtables wh
 ## Key Features
 
 - **Multi-Persona Voice Groups**:
-  - **Office**: Manager (Rohan) & Tech Lead (Kalpit) — timelines, system architecture, deliverables, and cost.
-  - **Chill**: Friend (Sunny) & Companion (Simran) — humor, creative brainstorming, and casual conversation.
+  - **Office**: Manager (Rohan) & Tech Lead (Dev) — timelines, system architecture, deliverables, and cost.
+  - **Chill**: Friend (Sunny) & Friend (Shiro) — humor, creative brainstorming, and casual banter.
   - **Family**: Mom (Shalini) & Dad (Mahesh) — health, personal care, career wisdom, and long-term discipline.
 - **Distinct Voices**: Every participant is powered by a unique Sarvam Bulbul voice profile with tuned timbre, pace, and language code.
-- **Sequential Turn-Taking**: Characters speak one-by-one. When addressed together or following a colleague, the second speaker responds directly to what the first speaker just stated.
-- **Meeting Agenda & Grounding**: Each room includes an editable agenda that anchors character responses to the current goal.
-- **Sub-Second Streaming Pipeline (< 500ms TTFA)**: Tokens stream from the LLM via HTTP/2 and pipeline immediately at clause boundaries (`.`, `!`, `?`, `,`, `।`) into TTS synthesis.
+- **Sequential Multi-Agent Turn-Taking**: Characters speak one-by-one. When addressed together or following a colleague, agents reference each other by name and build upon each other's points in punchy, concise 1-2 sentence voice responses.
+- **Direct Streaming WebSocket (No LiveKit Required)**: Pure lightweight bidirectional WebSocket directly between browser Web Audio and FastAPI with zero external WebRTC server dependencies or token servers.
+- **HTTP/2 Pre-Warming & Pipelined Synthesis (< 400ms TTFA)**: Persistent connection pool pre-warmed on server boot and connection; LLM tokens pipeline concurrently into TTS synthesis without blocking the reader.
 - **Instant Client-Side Barge-In**: Speaking interrupts active AI playback in under 10ms and signals the backend to halt generation.
 - **Dual-Layer Memory**:
   - Global shared room transcript visible to all participants.
@@ -29,18 +29,19 @@ Unlike single-persona voice bots, Awaaz runs live multi-character roundtables wh
 
 ```
 [ Browser Web Audio Client ]
-  - 800ms Calibrated VAD
+  - Direct WebSocket (/ws/voice) - No WebRTC / LiveKit needed
   - Instant Barge-in Cutoff
-  - Chunked Audio Queue Player
+  - Chunked Web Audio Queue Player
          │
          │ Bi-directional WebSocket (/ws/voice)
          ▼
 [ FastAPI Streaming Server ]
-  ├── 1. STT: Sarvam Saaras (saaras:v4)
-  ├── 2. Turn Orchestrator: Address detection & room routing
-  ├── 3. Dual-Layer Memory: Global transcript + local persona notes
-  ├── 4. HTTP/2 SSE LLM: Sarvam-105b token stream
-  └── 5. Streaming Clause TTS: Sarvam Bulbul V4 Flash (< 500ms TTFA)
+  ├── 1. Connection Pre-warming: HTTP/2 TLS pool hot on boot & connect
+  ├── 2. STT: Sarvam Saaras (saaras:v4)
+  ├── 3. Turn Orchestrator: Address detection, peer referrals & multi-agent routing
+  ├── 4. Dual-Layer Memory: Global transcript + local persona notes
+  ├── 5. HTTP/2 SSE LLM: Sarvam-105b token stream (concise 1-2 sentence responses)
+  └── 6. Pipelined Clause TTS: Sarvam Bulbul V4 Flash (< 400ms TTFA)
 ```
 
 ---

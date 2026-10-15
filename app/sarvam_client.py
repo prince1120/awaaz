@@ -2,11 +2,13 @@
 Sarvam AI Client for STT, LLM, and Bulbul V4 Flash TTS with HTTP/2 support.
 """
 import json
+import time
 import logging
 from typing import Dict, Any, Tuple, Optional, AsyncIterator
 import httpx
 from app.config import (
     SARVAM_API_KEY,
+    SARVAM_BASE_URL,
     SARVAM_TTS_ENDPOINT,
     SARVAM_STT_ENDPOINT,
     SARVAM_LLM_ENDPOINT,
@@ -53,14 +55,28 @@ class SarvamClient:
         self._client: Optional[httpx.AsyncClient] = None
 
     def get_or_create_client(self) -> httpx.AsyncClient:
-        """Returns or creates an HTTP/2 keep-alive client."""
+        """Returns or creates an HTTP/2 keep-alive client with tuned connection pooling."""
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 http2=True,
-                limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=120.0),
+                limits=httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=180.0),
                 timeout=httpx.Timeout(20.0, connect=3.0),
             )
         return self._client
+
+    async def warmup(self, custom_client: Optional[httpx.AsyncClient] = None) -> bool:
+        """Pre-warm DNS, TCP, and TLS HTTP/2 connection pool to Sarvam AI."""
+        client = custom_client or self.get_or_create_client()
+        try:
+            t0 = time.perf_counter()
+            resp = await client.get(SARVAM_BASE_URL, timeout=httpx.Timeout(4.0, connect=2.5))
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            http_ver = getattr(resp, "http_version", "HTTP/2")
+            logger.info(f"Sarvam HTTP/2 pool pre-warmed in {elapsed_ms:.1f}ms ({http_ver})")
+            return True
+        except Exception as e:
+            logger.warning(f"Sarvam HTTP/2 warmup warning: {e}")
+            return False
 
     async def close(self) -> None:
         """Close the HTTP/2 connection pool cleanly."""
@@ -102,7 +118,7 @@ class SarvamClient:
         self,
         messages: list,
         temperature: float = 0.7,
-        max_tokens: int = 200,
+        max_tokens: int = 85,
         model: str = DEFAULT_LLM_MODEL,
         custom_client: Optional[httpx.AsyncClient] = None,
     ) -> AsyncIterator[str]:
